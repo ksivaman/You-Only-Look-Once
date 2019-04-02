@@ -1,2 +1,2 @@
-# You-Only-Look-Once
-A PyTorch Object detector inspired by the YOLO algorithm
+# You Only Look Once
+A PyTorch implementation of the Object detector inspired by the YOLO algorithm. 
