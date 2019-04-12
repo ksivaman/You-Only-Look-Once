@@ -39,6 +39,7 @@ def arg_parse():
     
     return parser.parse_args()
 
+#the COCO dataset will support 80 classes
 start = 0 
 args = arg_parse()
 images = args.images
@@ -46,6 +47,6 @@ batch_size = int(args.bs)
 confidence = float(args.confidence)
 nms_thesh = float(args.nms_thresh)
 CUDA = torch.cuda.is_available()
-num_classes = 80    #For COCO
+num_classes = 80
 classes = load_classes("data/coco.names")
 
