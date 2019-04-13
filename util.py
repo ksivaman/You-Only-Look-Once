@@ -200,7 +200,7 @@ def letterbox_image(img, inp_dim):
 # takes in a cv2 image, resizes to input dimension resolution
 # outputs a final pytorch format image (batch, channel, w, h)
 def prep_image(img, inp_dim):
-    img = cv2.resize(img, (inp_dim, inp_dim))
-    img = img[:,:,::-1].transpose((2,0,1)).copy()
-    img = torch.from_numpy(img).float().div(255.0).unsqueeze(0)
-    return img
+    new_img = cv2.resize(img, (inp_dim, inp_dim))
+    new_img = img[:,:,::-1].transpose((2,0,1)).copy()
+    new_img = torch.from_numpy(img).float().div(255.0).unsqueeze(0)
+    return new_img
