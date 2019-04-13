@@ -64,4 +64,24 @@ assert (inp_dim > 32), "resolution has to be greater than 32"
 if CUDA:
     model.cuda()
 
+#test mode
 model.eval()
+
+#load images
+try:
+    imlist = [osp.join(osp.realpath('.', images, img)) for img in os.listdir(images)]
+except NotADirectoryError:
+    imlist = []
+    imlist.append(osp.join(osp.realpath('.'), images))
+except FileNotFoundError:
+    print("Incorrect input file name input, please try again..exiting\n")
+    exit()
+
+#create output folder if it doesn't already exist, else add to it. 
+if not os.path.exists(args.det):
+    os.makedirs(args.det)
+
+loaded_ims = [cv2.imread(x) for x in imlist]
+
+
+
