@@ -1,340 +1,205 @@
 from __future__ import division
-
-import torch
+import time
+import torch 
 import torch.nn as nn
-import torch.nn.functional as F
-import torch.autograd as Variable
+from torch.autograd import Variable
 import numpy as np
+import cv2 
+from util import *
+import argparse
+import os 
+import os.path as osp
+from darknet import Darknet
+import pickle as pkl
+import pandas as pd
+import random
 
-def parse_cfg(cfgfile):
+def arg_parse():    
+    parser = argparse.ArgumentParser(description='YOLO v3 Detection Module')
+   
+    parser.add_argument("--images", dest = 'images', help = "Image / Directory containing images to perform detection upon", default = "imgs", type = str)
+    parser.add_argument("--det", dest = 'det', help = "Image / Directory to store detections to", default = "det", type = str)
+    parser.add_argument("--bs", dest = "bs", help = "Batch size", default = 1)
+    parser.add_argument("--confidence", dest = "confidence", help = "Object Confidence to filter predictions", default = 0.5)
+    parser.add_argument("--nms_thresh", dest = "nms_thresh", help = "NMS Threshhold", default = 0.4)
+    parser.add_argument("--cfg", dest = 'cfgfile', help = "Config file", default = "cfg/yolov3.cfg", type = str)
+    parser.add_argument("--weights", dest = 'weightsfile', help = "weightsfile", default = "yolov3.weights", type = str)
+    parser.add_argument("--reso", dest = 'reso', help = "Input resolution of the network. Increase to increase accuracy. Decrease to increase speed", default = "416", type = str)
+    parser.add_argument("--showtime", help = "Show the detection timing data", default = True, type = bool)
 
-    file = open(cfgfile, 'r')
-    lines = file.read().split('\n')
-    lines = [x for x in lines if len(x) > 0]
-    lines = [x for x in lines if x[0] != '#'] 
-    lines = [x.rstrip().lstrip() for x in lines]          
+    return parser.parse_args()
     
-    block = {}
-    blocks = []
+args = arg_parse()
+images = args.images
+batch_size = int(args.bs)
+confidence = float(args.confidence)
+nms_thesh = float(args.nms_thresh)
+start = 0
+CUDA = torch.cuda.is_available()
+
+num_classes = 80
+classes = load_classes("data/coco.names")
+
+#load the model from darknet.py
+print("Loading network.....")
+model = Darknet(args.cfgfile)
+model.load_weights(args.weightsfile)
+print("Network successfully loaded")
+
+model.net_info["height"] = args.reso
+inp_dim = int(model.net_info["height"])
+assert inp_dim % 32 == 0 
+assert inp_dim > 32
+
+#gpu accleration
+if CUDA:
+    model.cuda()
+
+#only for testing
+model.eval()
+
+read_dir = time.time()
+#Detection phase
+try:
+    imlist = [osp.join(osp.realpath('.'), images, img) for img in os.listdir(images)]
+except NotADirectoryError:
+    imlist = []
+    imlist.append(osp.join(osp.realpath('.'), images))
+except FileNotFoundError:
+    print ("No file or directory with the name {}".format(images))
+    exit()
     
-    for line in lines:
-        if line[0] == "[":               
-            if len(block) != 0:          
-                blocks.append(block)     
-                block = {}               
-            block["type"] = line[1:-1].rstrip()     
-        else:
-            key,value = line.split("=") 
-            block[key.rstrip()] = value.lstrip()
-    blocks.append(block)
+if not os.path.exists(args.det):
+    os.makedirs(args.det)
+
+load_batch = time.time()
+loaded_ims = [cv2.imread(x) for x in imlist]
+
+im_batches = list(map(prep_image, loaded_ims, [inp_dim for x in range(len(imlist))]))
+im_dim_list = [(x.shape[1], x.shape[0]) for x in loaded_ims]
+im_dim_list = torch.FloatTensor(im_dim_list).repeat(1,2)
+
+
+leftover = 0
+if (len(im_dim_list) % batch_size):
+    leftover = 1
+
+if batch_size != 1:
+    num_batches = len(imlist) // batch_size + leftover            
+    im_batches = [torch.cat((im_batches[i*batch_size : min((i +  1)*batch_size,
+                        len(im_batches))]))  for i in range(num_batches)]  
+
+write = 0
+
+
+if CUDA:
+    im_dim_list = im_dim_list.cuda()
     
-    return blocks
+start_det_loop = time.time()
+for i, batch in enumerate(im_batches):
 
-def create_modules(blocks):
-    net_info = blocks[0]
-    module_list = nn.ModuleList()
-    prev_filters = 3
-    output_filters = []
+    start = time.time()
+    if CUDA:
+        batch = batch.cuda()
+    with torch.no_grad():
+        prediction = model(Variable(batch), CUDA)
 
-    for index, x in enumerate(blocks[1:]):
-        module = nn.Sequential()
+    prediction = write_results(prediction, confidence, num_classes, nms_conf = nms_thesh)
 
-        if (x["type"] == "convolutional"):
-            activation = x["activation"]
-            try:
-                batch_normalize = int(x["batch_normalize"])
-                bias = False
-            except:
-                batch_normalize = 0
-                bias = True
+    end = time.time()
 
-            filters=int(x["filters"])
-            padding = int(x["pad"])
-            kernel_size = int(x["size"])
-            stride = int(x["stride"])
+    if type(prediction) == int:
 
-            if padding:
-                pad = (kernel_size - 1) // 2
-            else:
-                pad = 0
+        for im_num, image in enumerate(imlist[i*batch_size: min((i +  1)*batch_size, len(imlist))]):
+            im_id = i*batch_size + im_num
+            print("{0:20s} predicted in {1:6.3f} seconds".format(image.split("/")[-1], (end - start)/batch_size))
+            print("{0:20s} {1:s}".format("Objects Detected:", ""))
+            print("----------------------------------------------------------")
+        continue
 
-            conv = nn.Conv2d(prev_filters, filters, kernel_size, stride, pad, bias = bias)
-            module.add_module("conv_{0}".format(index), conv)
+    prediction[:,0] += i*batch_size   
 
-            if batch_normalize:
-                bn = nn.BatchNorm2d(filters)
-                module.add_module("batch_norm_{0}".format(index), bn)
+    if not write:                     
+        output = prediction  
+        write = 1
+    else:
+        output = torch.cat((output,prediction))
 
-            if batch_normalize:
-                bn = nn.BatchNorm2d(filters)
-                module.add_module("batch_norm_{0}".format(index), bn)
+    for im_num, image in enumerate(imlist[i*batch_size: min((i +  1)*batch_size, len(imlist))]):
+        im_id = i*batch_size + im_num
+        objs = [classes[int(x[-1])] for x in output if int(x[0]) == im_id]
+        print("{0:20s} predicted in {1:6.3f} seconds".format(image.split("/")[-1], (end - start)/batch_size))
+        print("{0:20s} {1:s}".format("Objects Detected:", " ".join(objs)))
+        print("----------------------------------------------------------")
 
-            if activation == "leaky":
-                act = nn.LeakyReLU(0.1, inplace = True)
-                module.add_module("leaky_{0}".format(index), act)
+    if CUDA:
+        torch.cuda.synchronize()       
+try:
+    output
+except NameError:
+    print ("No detections were made")
+    exit()
 
-        elif (x["type"] == "upsample"):
-            stride = int(x["stride"])
-            up = nn.Upsample(scale_factor = 2, mode = "bilinear")
-            module.add_module("upsample_{0}".format(index), up)
+im_dim_list = torch.index_select(im_dim_list, 0, output[:,0].long())
 
-        elif(x["type"] == "route"):
-            x["layers"] = x["layers"].split(',')
-            start = int(x["layers"][0])
+scaling_factor = torch.min(416/im_dim_list,1)[0].view(-1,1)
 
-            try:
-                end = int(x["layers"][1])
-            except:
-                end = 0
 
-            if start > 0: 
-                start = start - index
-            if end > 0:
-                end = end - index
+output[:,[1,3]] -= (inp_dim - scaling_factor*im_dim_list[:,0].view(-1,1))/2
+output[:,[2,4]] -= (inp_dim - scaling_factor*im_dim_list[:,1].view(-1,1))/2
 
-            route = EmptyLayer()
-            module.add_module("route_{0}".format(index), route)
 
-            if end < 0:
-                filters = output_filters[index + start] + output_filters[index + end]
-            else:
-                filters= output_filters[index + start]
 
-        elif x["type"] == "shortcut":
-            shortcut = EmptyLayer()
-            module.add_module("shortcut_{}".format(index), shortcut)
+output[:,1:5] /= scaling_factor
 
-        elif x["type"] == "yolo":
-            mask = x["mask"].split(",")
-            mask = [int(x) for x in mask]
-
-            anchors = x["anchors"].split(",")
-            anchors = [int(a) for a in anchors]
-            anchors = [(anchors[i], anchors[i+1]) for i in range(0, len(anchors),2)]
-            anchors = [anchors[i] for i in mask]
-
-            detection = DetectionLayer(anchors)
-            module.add_module("Detection_{}".format(index), detection)
-
-        module_list.append(module)
-        prev_filters = filters
-        output_filters.append(filters)
+for i in range(output.shape[0]):
+    output[i, [1,3]] = torch.clamp(output[i, [1,3]], 0.0, im_dim_list[i,0])
+    output[i, [2,4]] = torch.clamp(output[i, [2,4]], 0.0, im_dim_list[i,1])
     
-    return (net_info, module_list)
-
-class DetectionLayer(nn.Module):
-    def __init__(self, anchors):
-        super(DetectionLayer, self).__init__()
-        self.anchors = anchors
-
-class EmptyLayer(nn.Module):
-    def __init__(self):
-        super(EmptyLayer, self).__init__()
-
-# blocks = parse_cfg('cfg/yolov3.cfg')
-# print(create_modules(blocks))
-
-class Darknet(nn.Module):
-    def __init__(self, cfgfile):
-        super(Darknet, self).__init__()
-        self.blocks = parse_cfg(cfgfile)
-        self.net_info, self.module_list = create_modules(self.blocks)
-
-    def forward(self, x, CUDA):
-        modules = self.blocks[1:]
-        outputs = {}
-
-        write = 0
-        for i, module in enumerate(modules):        
-            module_type = (module["type"])
-
-            if module_type == "convolutional" or module_type == "upsample":
-                x = self.module_list[i](x)
-
-            elif module_type == "route":
-                layers = module["layers"]
-                layers = [int(a) for a in layers]
     
-                if (layers[0]) > 0:
-                    layers[0] = layers[0] - i  
+output_recast = time.time()
+class_load = time.time()
+colors = pkl.load(open("pallete", "rb"))
 
-                if len(layers) == 1:
-                    x = outputs[i + (layers[0])]    
-                else:
-                    if (layers[1]) > 0:
-                        layers[1] = layers[1] - i
-    
-                    map1 = outputs[i + layers[0]]
-                    map2 = outputs[i + layers[1]]
-                    x = torch.cat((map1, map2), 1)
-                
-    
-            elif  module_type == "shortcut":
-                from_ = int(module["from"])
-                x = outputs[i-1] + outputs[i+from_]
-                outputs[i] = x
+draw = time.time()
 
-            elif module_type == 'yolo':        
-                
-                anchors = self.module_list[i][0].anchors
-                #Get the input dimensions
-                inp_dim = int (self.net_info["height"])
-                
-                #Get the number of classes
-                num_classes = int (modules[i]["classes"])
-                
-                #Output the result
-                x = x.data
-                x = predict_transform(x, inp_dim, anchors, num_classes, CUDA)
-                
-                if type(x) == int:
-                    continue
 
-                
-                if not write:
-                    detections = x
-                    write = 1
-                
-                else:
-                    detections = torch.cat((detections, x), 1)
-                
-                outputs[i] = outputs[i-1]
-                
-        try:
-            return detections
-        except:
-            return 0
+def write(x, results):
+    c1 = tuple(x[1:3].int())
+    c2 = tuple(x[3:5].int())
+    img = results[int(x[0])]
+    cls = int(x[-1])
+    color = random.choice(colors)
+    label = "{0}".format(classes[cls])
+    cv2.rectangle(img, c1, c2,color, 1)
+    t_size = cv2.getTextSize(label, cv2.FONT_HERSHEY_PLAIN, 1 , 1)[0]
+    c2 = c1[0] + t_size[0] + 3, c1[1] + t_size[1] + 4
+    cv2.rectangle(img, c1, c2,color, -1)
+    cv2.putText(img, label, (c1[0], c1[1] + t_size[1] + 4), cv2.FONT_HERSHEY_PLAIN, 1, [225,255,255], 1);
+    return img
 
-    def load_weights(self, weightfile):
-        
-        #Open the weights file
-        fp = open(weightfile, "rb")
 
-        #The first 4 values are header information 
-        # 1. Major version number
-        # 2. Minor Version Number
-        # 3. Subversion number 
-        # 4. IMages seen 
-        header = np.fromfile(fp, dtype = np.int32, count = 5)
-        self.header = torch.from_numpy(header)
-        self.seen = self.header[3]
-        
-        #The rest of the values are the weights
-        # Let's load them up
-        weights = np.fromfile(fp, dtype = np.float32)
-        
-        ptr = 0
-        for i in range(len(self.module_list)):
-            module_type = self.blocks[i + 1]["type"]
-            
-            if module_type == "convolutional":
-                model = self.module_list[i]
-                try:
-                    batch_normalize = int(self.blocks[i+1]["batch_normalize"])
-                except:
-                    batch_normalize = 0
-                
-                conv = model[0]
-                
-                if (batch_normalize):
-                    bn = model[1]
-                    
-                    #Get the number of weights of Batch Norm Layer
-                    num_bn_biases = bn.bias.numel()
-                    
-                    #Load the weights
-                    bn_biases = torch.from_numpy(weights[ptr:ptr + num_bn_biases])
-                    ptr += num_bn_biases
-                    
-                    bn_weights = torch.from_numpy(weights[ptr: ptr + num_bn_biases])
-                    ptr  += num_bn_biases
-                    
-                    bn_running_mean = torch.from_numpy(weights[ptr: ptr + num_bn_biases])
-                    ptr  += num_bn_biases
-                    
-                    bn_running_var = torch.from_numpy(weights[ptr: ptr + num_bn_biases])
-                    ptr  += num_bn_biases
-                    
-                    #Cast the loaded weights into dims of model weights. 
-                    bn_biases = bn_biases.view_as(bn.bias.data)
-                    bn_weights = bn_weights.view_as(bn.weight.data)
-                    bn_running_mean = bn_running_mean.view_as(bn.running_mean)
-                    bn_running_var = bn_running_var.view_as(bn.running_var)
+list(map(lambda x: write(x, loaded_ims), output))
 
-                    #Copy the data to model
-                    bn.bias.data.copy_(bn_biases)
-                    bn.weight.data.copy_(bn_weights)
-                    bn.running_mean.copy_(bn_running_mean)
-                    bn.running_var.copy_(bn_running_var)
-                
-                else:
-                    #Number of biases
-                    num_biases = conv.bias.numel()
-                
-                    #Load the weights
-                    conv_biases = torch.from_numpy(weights[ptr: ptr + num_biases])
-                    ptr = ptr + num_biases
-                    
-                    #reshape the loaded weights according to the dims of the model weights
-                    conv_biases = conv_biases.view_as(conv.bias.data)
-                    
-                    #Finally copy the data
-                    conv.bias.data.copy_(conv_biases)
-                    
-                    
-                #Let us load the weights for the Convolutional layers
-                num_weights = conv.weight.numel()
-                
-                #Do the same as above for weights
-                conv_weights = torch.from_numpy(weights[ptr:ptr+num_weights])
-                ptr = ptr + num_weights
+det_names = pd.Series(imlist).apply(lambda x: "{}/det_{}".format(args.det,x.split("/")[-1]))
 
-                conv_weights = conv_weights.view_as(conv.weight.data)
-                conv.weight.data.copy_(conv_weights)
-                
-    def save_weights(self, savedfile, cutoff = 0):
-            
-        if cutoff <= 0:
-            cutoff = len(self.blocks) - 1
-        
-        fp = open(savedfile, 'wb')
-        
-        # Attach the header at the top of the file
-        self.header[3] = self.seen
-        header = self.header
+list(map(cv2.imwrite, det_names, loaded_ims))
 
-        header = header.numpy()
-        header.tofile(fp)
-        
-        # Now, let us save the weights 
-        for i in range(len(self.module_list)):
-            module_type = self.blocks[i+1]["type"]
-            
-            if (module_type) == "convolutional":
-                model = self.module_list[i]
-                try:
-                    batch_normalize = int(self.blocks[i+1]["batch_normalize"])
-                except:
-                    batch_normalize = 0
-                    
-                conv = model[0]
+def time_sum(showtimesum)
+    end = time.time()
 
-                if (batch_normalize):
-                    bn = model[1]
-                
-                    #If the parameters are on GPU, convert them back to CPU
-                    #We don't convert the parameter to GPU
-                    #Instead. we copy the parameter and then convert it to CPU
-                    #This is done as weight are need to be saved during training
-                    cpu(bn.bias.data).numpy().tofile(fp)
-                    cpu(bn.weight.data).numpy().tofile(fp)
-                    cpu(bn.running_mean).numpy().tofile(fp)
-                    cpu(bn.running_var).numpy().tofile(fp)
-                
-            
-                else:
-                    cpu(conv.bias.data).numpy().tofile(fp)
-                
-                
-                #Let us save the weights for the Convolutional layers
-                cpu(conv.weight.data).numpy().tofile(fp)
+    print("SUMMARY")
+    print("----------------------------------------------------------")
+    print("{:25s}: {}".format("Task", "Time Taken (in seconds)"))
+    print()
+    print("{:25s}: {:2.3f}".format("Reading addresses", load_batch - read_dir))
+    print("{:25s}: {:2.3f}".format("Loading batch", start_det_loop - load_batch))
+    print("{:25s}: {:2.3f}".format("Detection (" + str(len(imlist)) +  " images)", output_recast - start_det_loop))
+    print("{:25s}: {:2.3f}".format("Output Processing", class_load - output_recast))
+    print("{:25s}: {:2.3f}".format("Drawing Boxes", end - draw))
+    print("{:25s}: {:2.3f}".format("Average time_per_img", (end - load_batch)/len(imlist)))
+    print("----------------------------------------------------------")
+
+time_sum(args.showtime)
+
+torch.cuda.empty_cache()
