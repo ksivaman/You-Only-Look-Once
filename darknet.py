@@ -186,19 +186,20 @@ det_names = pd.Series(imlist).apply(lambda x: "{}/det_{}".format(args.det,x.spli
 list(map(cv2.imwrite, det_names, loaded_ims))
 
 def time_sum(showtimesum)
-    end = time.time()
+    if (showtimesum):
+        end = time.time()
 
-    print("SUMMARY")
-    print("----------------------------------------------------------")
-    print("{:25s}: {}".format("Task", "Time Taken (in seconds)"))
-    print()
-    print("{:25s}: {:2.3f}".format("Reading addresses", load_batch - read_dir))
-    print("{:25s}: {:2.3f}".format("Loading batch", start_det_loop - load_batch))
-    print("{:25s}: {:2.3f}".format("Detection (" + str(len(imlist)) +  " images)", output_recast - start_det_loop))
-    print("{:25s}: {:2.3f}".format("Output Processing", class_load - output_recast))
-    print("{:25s}: {:2.3f}".format("Drawing Boxes", end - draw))
-    print("{:25s}: {:2.3f}".format("Average time_per_img", (end - load_batch)/len(imlist)))
-    print("----------------------------------------------------------")
+        print("SUMMARY")
+        print("----------------------------------------------------------")
+        print("{:25s}: {}".format("Task", "Time Taken (in seconds)"))
+        print()
+        print("{:25s}: {:2.3f}".format("Reading addresses", load_batch - read_dir))
+        print("{:25s}: {:2.3f}".format("Loading batch", start_det_loop - load_batch))
+        print("{:25s}: {:2.3f}".format("Detection (" + str(len(imlist)) +  " images)", output_recast - start_det_loop))
+        print("{:25s}: {:2.3f}".format("Output Processing", class_load - output_recast))
+        print("{:25s}: {:2.3f}".format("Drawing Boxes", end - draw))
+        print("{:25s}: {:2.3f}".format("Average time_per_img", (end - load_batch)/len(imlist)))
+        print("----------------------------------------------------------")
 
 time_sum(args.showtime)
 
